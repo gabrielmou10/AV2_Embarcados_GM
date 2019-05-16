@@ -95,6 +95,30 @@
 #include "tfont.h"
 #include "digital521.h"
 
+/* ICONS */
+#include "ar.h"
+#include "soneca.h"
+#include "termometro.h"
+
+/* AFEC */
+// Canal do sensor de temperatura */
+#define AFEC_CHANNEL_TEMP 0
+// Reference voltage for AFEC,in mv. */
+#define VOLT_REF        (3300)
+// The maximal digital value */
+// 2^12 - 1                  */
+#define MAX_DIGITAL     (4095)
+
+/* LCD + TOUCH    */
+#define MAX_ENTRIES        3
+struct ili9488_opt_t g_ili9488_display_opt;
+const uint32_t BUTTON_W = 120;
+const uint32_t BUTTON_H = 150;
+const uint32_t BUTTON_BORDER = 2;
+const uint32_t BUTTON_X = ILI9488_LCD_WIDTH/2;
+const uint32_t BUTTON_Y = ILI9488_LCD_HEIGHT/2;
+
+/* BUTTONS */
 #define BUTPLUS_PIO			PIOC
 #define BUTPLUS_PIO_ID		12
 #define BUTPLUS_PIO_IDX		30
@@ -105,76 +129,21 @@
 #define BUTLESS_PIO_IDX		33
 #define BUTLESS_PIO_IDX_MASK (1u << BUTLESS_PIO_IDX)
 
+/* RTC */
+#define YEAR        2019
+#define MOUNTH      1
+#define DAY         1
+#define WEEK        1
+#define HOUR        0
+#define MINUTE      0
+#define SECOND      0
 
-/************************************************************************/
-/* LCD + TOUCH                                                          */
-/************************************************************************/
-#define MAX_ENTRIES        3
+volatile int flag_rtc = 0;
 
-struct ili9488_opt_t g_ili9488_display_opt;
-const uint32_t BUTTON_W = 120;
-const uint32_t BUTTON_H = 150;
-const uint32_t BUTTON_BORDER = 2;
-const uint32_t BUTTON_X = ILI9488_LCD_WIDTH/2;
-const uint32_t BUTTON_Y = ILI9488_LCD_HEIGHT/2;
 
-// Buttons Digital
-
-void init(void){
-	// Initialize the board clock
-	sysclk_init();
-	
-	// Desativa WatchDog Timer
-	WDT->WDT_MR = WDT_MR_WDDIS;
-	
-	// Ativa o PIO na qual o LED, o Buzzer e os botoes foram conectados
-	// para que possamos controlar eles.
-	pmc_enable_periph_clk(BUTPLUS_PIO_ID);
-	pmc_enable_periph_clk(BUTLESS_PIO_ID);
-	
-	
-	// Inicializa o pino dos botoes next e play/stop como entradas com um pull-up.
-	pio_set_input(BUTPLUS_PIO_ID,BUTPLUS_PIO_IDX_MASK,PIO_DEFAULT);
-	pio_pull_up(BUTPLUS_PIO,BUTPLUS_PIO_IDX_MASK,1);
-	pio_set_input(BUTLESS_PIO_ID,BUTLESS_PIO_IDX_MASK,PIO_DEFAULT);
-	pio_pull_up(BUTLESS_PIO,BUTLESS_PIO_IDX_MASK,1);
-}
-
-// Analogic
-
-/** Header printf */
-#define STRING_EOL    "\r"
-#define STRING_HEADER "-- AFEC Temperature Sensor Example --\r\n" \
-"-- "BOARD_NAME" --\r\n" \
-"-- Compiled: "__DATE__" "__TIME__" --"STRING_EOL
-
-/** Reference voltage for AFEC,in mv. */
-#define VOLT_REF        (3300)
-
-/** The maximal digital value */
-/** 2^12 - 1                  */
-#define MAX_DIGITAL     (4095)
-
-//GLOBALS
-/** The conversion data is done flag */
-volatile bool g_is_conversion_done = false;
-volatile bool g_is_res_done = false;
-
-/** The conversion data value */
-volatile uint32_t g_ul_value = 0;
-volatile uint32_t g_res_value = 0;
-
-volatile bool g_delay = false;
-
-/* Canal do sensor de temperatura */
-#define AFEC_CHANNEL_TEMP_SENSOR 11
-#define AFEC_CHANNEL_RES_PIN 0
-
-/************************************************************************/
-/* RTOS                                                                  */
-/************************************************************************/
+/* RTOS   */
 #define TASK_MXT_STACK_SIZE            (2*1024/sizeof(portSTACK_TYPE))
-#define TASK_MXT_STACK_PRIORITY        (tskIDLE_PRIORITY)  
+#define TASK_MXT_STACK_PRIORITY        (tskIDLE_PRIORITY)
 
 #define TASK_LCD_STACK_SIZE            (2*1024/sizeof(portSTACK_TYPE))
 #define TASK_LCD_STACK_PRIORITY        (tskIDLE_PRIORITY)
@@ -183,90 +152,23 @@ volatile bool g_delay = false;
 #define TASK_AFEC_STACK_PRIORITY        (tskIDLE_PRIORITY)
 
 typedef struct {
-  uint x;
-  uint y;
+	uint x;
+	uint y;
 } touchData;
 
+// GLOBALS
+volatile char time_str[300];
 
-#include "ar.h"
-#include "soneca.h"
-#include "termometro.h"
-
+//QueueHandle
 QueueHandle_t xQueueTouch;
+QueueHandle_t xQueueTemp;
+QueueHandle_t xQueueRTC;
+QueueHandle_t xQueueAfec;
 
-// Analogic
-
-static void AFEC_Res_callback(void)
-{
-	g_res_value = afec_channel_get_value(AFEC0, AFEC_CHANNEL_RES_PIN);
-	g_is_res_done = true;
-}
-
-static int32_t convert_adc_to_res(int32_t ADC_value){
-
-  int32_t ul_vol;
-  int32_t ul_res;
-
-  /*
-   * converte bits -> tens?o (Volts)
-   */
-	ul_vol = ADC_value * VOLT_REF / (float) MAX_DIGITAL;
-
-  /*
-   * According to datasheet, The output voltage VT = 0.72V at 27C
-   * and the temperature slope dVT/dT = 2.33 mV/C
-   */
-  ul_res = (ul_vol - 720)  * 100 / 233 + 27; //MUDAR
-  return(ul_res);
-}
-
-static void config_ADC_TEMP_RES(void){
-/*************************************
-   * Ativa e configura AFEC
-   *************************************/
-  /* Ativa AFEC - 0 */
-	afec_enable(AFEC0);
-
-	/* struct de configuracao do AFEC */
-	struct afec_config afec_cfg;
-
-	/* Carrega parametros padrao */
-	afec_get_config_defaults(&afec_cfg);
-
-	/* Configura AFEC */
-	afec_init(AFEC0, &afec_cfg);
-
-	/* Configura trigger por software */
-	afec_set_trigger(AFEC0, AFEC_TRIG_SW);
-
-	/* configura call back */
-	afec_set_callback(AFEC0, AFEC_INTERRUPT_EOC_11,	AFEC_Temp_callback, 1);
-	afec_set_callback(AFEC0, AFEC_INTERRUPT_EOC_0,	AFEC_Res_callback, 1);
-
-	/*** Configuracao espec?fica do canal AFEC ***/
-	struct afec_ch_config afec_ch_cfg;
-	afec_ch_get_config_defaults(&afec_ch_cfg);
-	afec_ch_cfg.gain = AFEC_GAINVALUE_0;
-	afec_ch_set_config(AFEC0, AFEC_CHANNEL_TEMP_SENSOR, &afec_ch_cfg);
-
-	/*
-	* Calibracao:
-	* Because the internal ADC offset is 0x200, it should cancel it and shift
-	 down to 0.
-	 */
-	afec_channel_set_analog_offset(AFEC0, AFEC_CHANNEL_TEMP_SENSOR, 0x200);
-	afec_channel_set_analog_offset(AFEC0, AFEC_CHANNEL_RES_PIN, 0x200);
-
-	/***  Configura sensor de temperatura ***/
-	struct afec_temp_sensor_config afec_temp_sensor_cfg;
-
-	afec_temp_sensor_get_config_defaults(&afec_temp_sensor_cfg);
-	afec_temp_sensor_set_config(AFEC0, &afec_temp_sensor_cfg);
-
-	/* Selecina canal e inicializa convers?o */
-	afec_channel_enable(AFEC0, AFEC_CHANNEL_TEMP_SENSOR);
-	afec_channel_enable(AFEC0, AFEC_CHANNEL_RES_PIN);
-}
+//Semaphores
+SemaphoreHandle_t xSemaphoreRTC;
+SemaphoreHandle_t xSemaphorePlus;
+SemaphoreHandle_t xSemaphoreLess;
 
 
 /************************************************************************/
@@ -421,6 +323,67 @@ static void mxt_init(struct mxt_device *device)
 			+ MXT_GEN_COMMANDPROCESSOR_CALIBRATE, 0x01);
 }
 
+void RTC_init(){
+	/* Configura o PMC */
+	pmc_enable_periph_clk(ID_RTC);
+
+	/* Default RTC configuration, 24-hour mode */
+	rtc_set_hour_mode(RTC, 0);
+
+	/* Configura data e hora manualmente */
+	rtc_set_date(RTC, YEAR, MOUNTH, DAY, WEEK);
+	rtc_set_time(RTC, HOUR, MINUTE, SECOND);
+
+	/* Configure RTC interrupts */
+	NVIC_DisableIRQ(RTC_IRQn);
+	NVIC_ClearPendingIRQ(RTC_IRQn);
+	NVIC_SetPriority(RTC_IRQn, 5);
+	NVIC_EnableIRQ(RTC_IRQn);
+
+	/* Ativa interrupcao via segundos */
+	rtc_enable_interrupt(RTC,  RTC_IER_ALREN);
+	
+
+
+}
+void io_init(void)
+{
+	// Inicializa clock do periférico PIO responsavel pelo botao
+	pmc_enable_periph_clk(BUTPLUS_PIO_ID);
+	pmc_enable_periph_clk(BUTLESS_PIO_ID);
+
+	// Configura PIO para lidar com o pino do botão como entrada
+	// com pull-up
+	pio_configure(BUTPLUS_PIO, PIO_INPUT, BUTPLUS_PIO_IDX_MASK, PIO_PULLUP);
+	pio_configure(BUTLESS_PIO, PIO_INPUT, BUTLESS_PIO_IDX_MASK, PIO_PULLUP);
+
+	// Configura interrupção no pino referente ao botao e associa
+	// função de callback caso uma interrupção for gerada
+
+	pio_handler_set(BUTPLUS_PIO,
+	BUTPLUS_PIO_ID,
+	BUTPLUS_PIO_IDX,
+	PIO_IT_FALL_EDGE,
+	butplus_callback);
+	
+	pio_handler_set(BUTLESS_PIO,
+	BUTLESS_PIO_ID,
+	BUTLESS_PIO_IDX_MASK,
+	PIO_IT_FALL_EDGE,
+	butless_callback);
+
+	// Ativa interrupção
+	pio_enable_interrupt(BUTPLUS_PIO, BUTPLUS_PIO_IDX_MASK);
+	pio_enable_interrupt(BUTLESS_PIO, BUTLESS_PIO_IDX_MASK);
+
+	// Configura NVIC para receber interrupcoes do PIO do botao
+	// com prioridade 4 (quanto mais próximo de 0 maior)
+	NVIC_EnableIRQ(BUTPLUS_PIO_ID);
+	NVIC_SetPriority(BUTPLUS_PIO_ID, 4);
+	NVIC_EnableIRQ(BUTLESS_PIO_ID);
+	NVIC_SetPriority(BUTLESS_PIO_ID, 4);
+}
+
 /************************************************************************/
 /* funcoes                                                              */
 /************************************************************************/
@@ -461,8 +424,6 @@ void draw_texts(void){
 	font_draw_text(&digital52, "100%", 210, 320, 1);
 }
 
-
-
 uint32_t convert_axis_system_x(uint32_t touch_y) {
 	// entrada: 4096 - 0 (sistema de coordenadas atual)
 	// saida: 0 - 320
@@ -475,10 +436,108 @@ uint32_t convert_axis_system_y(uint32_t touch_x) {
 	return ILI9488_LCD_HEIGHT*touch_x/4096;
 }
 
+// CallBack//
+static void AFEC_Temp_callback(void)
+{
+	int32_t tvalue;
+	tvalue = afec_channel_get_value(AFEC0, AFEC_CHANNEL);
+	xQueueSendFromISR( xQueueAfec, &tvalue, 0);
+}
+
+void butplus_callback(void){
+	BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+	printf("butplus_callback \n");
+	xSemaphoreGiveFromISR(xSemaphorePlus, NULL);
+}
+
+void butless_callback(void){
+	BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+	printf("butless_callback2\n");
+	xSemaphoreGiveFromISR(xSemaphoreLess, NULL);
+}
+
+// Handler //
+void RTC_Handler(void)
+{
+	uint32_t ul_status = rtc_get_status(RTC);
+	rtc_clear_status(RTC, RTC_SCCR_ALRCLR);
+	flag_rtc = 1;
+	xSemaphoreGiveFromISR(xSemaphoreRTC, NULL);
+	
+	printf("rtc_callback333\n");
+	
+	rtc_clear_status(RTC, RTC_SCCR_ACKCLR);
+	rtc_clear_status(RTC, RTC_SCCR_TIMCLR);
+	rtc_clear_status(RTC, RTC_SCCR_CALCLR);
+	rtc_clear_status(RTC, RTC_SCCR_TDERRCLR);
+	
+}
+
+// AFEC
+static int32_t convert_adc_to_temp(int32_t ADC_value){
+
+  int32_t ul_vol;
+  int32_t ul_res;
+
+  /*
+   * converte bits -> tens?o (Volts)
+   */
+	ul_vol = ADC_value * VOLT_REF / (float) MAX_DIGITAL;
+
+  /*
+   * According to datasheet, The output voltage VT = 0.72V at 27C
+   * and the temperature slope dVT/dT = 2.33 mV/C
+   */
+  ul_res = (ul_vol - 720)  * 100 / 233 + 27; //MUDAR
+  return(ul_res);
+}
+
+static void config_ADC_TEMP(void){
+	afec_enable(AFEC0);
+
+	/* struct de configuracao do AFEC */
+	struct afec_config afec_cfg;
+
+	/* Carrega parametros padrao */
+	afec_get_config_defaults(&afec_cfg);
+
+	/* Configura AFEC */
+	afec_init(AFEC0, &afec_cfg);
+
+	/* Configura trigger por software */
+	afec_set_trigger(AFEC0, AFEC_TRIG_SW);
+
+	/* configura call back */
+	afec_set_callback(AFEC0, AFEC_INTERRUPT_EOC_0,	AFEC_Temp_callback, 1);
+
+	/*** Configuracao espec?fica do canal AFEC ***/
+	struct afec_ch_config afec_ch_cfg;
+	afec_ch_get_config_defaults(&afec_ch_cfg);
+	afec_ch_cfg.gain = AFEC_GAINVALUE_0;
+	afec_ch_set_config(AFEC0, AFEC_CHANNEL_TEMP, &afec_ch_cfg);
+
+	/*
+	* Calibracao:
+	* Because the internal ADC offset is 0x200, it should cancel it and shift
+	 down to 0.
+	 */
+	afec_channel_set_analog_offset(AFEC0, AFEC_CHANNEL_TEMP, 0x200);
+
+
+	/***  Configura sensor de temperatura ***/
+	struct afec_temp_sensor_config afec_temp_sensor_cfg;
+
+	afec_temp_sensor_get_config_defaults(&afec_temp_sensor_cfg);
+	afec_temp_sensor_set_config(AFEC0, &afec_temp_sensor_cfg);
+
+	/* Selecina canal e inicializa convers?o */
+	afec_channel_enable(AFEC0, AFEC_CHANNEL_TEMP);
+}
+
+// NOT USED
 void update_screen(uint32_t tx, uint32_t ty) {
 
 }
-
 
 void mxt_handler(struct mxt_device *device, uint *x, uint *y)
 {
@@ -539,8 +598,8 @@ void task_mxt(void){
 
 void task_lcd(void){
   xQueueTouch = xQueueCreate( 10, sizeof( touchData ) );
-	configure_lcd();
   
+  configure_lcd();
   draw_screen();
   draw_lines();
   draw_icons();
@@ -557,9 +616,52 @@ void task_lcd(void){
 
 void task_afec(void){
 	
-	xSemaphoreTake(xSemaphore , ())
+	xQueueAfec = xQueueCreate( 10, sizeof( int32_t ) );
+
+	config_ADC_TEMP();
+	afec_start_software_conversion(AFEC0);
 	
-	
+	int32_t adcvalue;
+	int32_t tvalue;
+
+	while (true) {
+		if (xQueueReceive( xQueueAfec, &(adcvalue), ( TickType_t )  2000 / portTICK_PERIOD_MS)) {
+			tvalue = convert_adc_to_temp(adcvalue);
+			afec_start_software_conversion(AFEC0);
+			xQueueSend( xQueueTemp, &tvalue, 0);
+		}
+	}
+}
+
+static void task_rtc(void *pvParameters){
+	xQueueRTC = xQueueCreate( 10, sizeof( int32_t ) );
+	printf("\n task rtc \n");
+	xSemaphoreRTC = xSemaphoreCreateBinary();
+	RTC_init();
+	rtc_set_time_alarm(RTC, 1, HOUR, 1, MINUTE,1, SECOND+3);
+	int hour, min, sec;
+	int receive;
+
+	if (xSemaphoreRTC == NULL)
+	printf("falha em criar o semaforoRTC \n");
+
+	while (1) {
+		if( xSemaphoreTake(xSemaphoreRTC, ( TickType_t ) 50) == pdTRUE){
+			rtc_get_time(RTC, &hour, &min, &sec);
+			min++;
+			if(min>=60){
+				min = 0;
+				hour++;
+			}
+			if(hour>=24){
+				hour = 0;
+			}
+			rtc_set_time_alarm(RTC, 1, hour, 1, min, 1, sec);
+			sprintf(time_str,"%02d:%02d", hour, min);
+			font_draw_text(&digital52, time_str, 50, 50, 1);
+		}
+		
+	}
 }
 
 
@@ -579,10 +681,7 @@ int main(void)
 
 	sysclk_init(); /* Initialize system clocks */
 	board_init();  /* Initialize board */
-	ioport_init();
 	
-	
-	config_ADC();
 	
 	/* Initialize stdio on USART */
 	stdio_serial_init(USART_SERIAL_EXAMPLE, &usart_serial_options);
