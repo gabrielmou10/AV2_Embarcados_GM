@@ -112,7 +112,7 @@
 #define BUTPLUS_PIO_IDX       28u
 #define BUTPLUS_PIO_IDX_MASK  (1u << BUTPLUS_PIO_IDX)
 
-#define BUTLESS_PIO          PIOC
+#define BUTLESS_PIO           PIOC
 #define BUTLESS_PIO_ID        ID_PIOC
 #define BUTLESS_PIO_IDX       31u
 #define BUTLESS_PIO_IDX_MASK  (1u << BUTLESS_PIO_IDX)
@@ -147,8 +147,8 @@ volatile int flag_rtc = 0;
 
 
 /* RTOS   */
-//#define TASK_MXT_STACK_SIZE            (2*1024/sizeof(portSTACK_TYPE))
-//#define TASK_MXT_STACK_PRIORITY        (tskIDLE_PRIORITY)
+#define TASK_MXT_STACK_SIZE            (2*1024/sizeof(portSTACK_TYPE))
+#define TASK_MXT_STACK_PRIORITY        (tskIDLE_PRIORITY)
 
 #define TASK_LCD_STACK_SIZE            (2*1024/sizeof(portSTACK_TYPE))
 #define TASK_LCD_STACK_PRIORITY        (tskIDLE_PRIORITY)
@@ -172,16 +172,11 @@ typedef struct {
 
 // GLOBALS
 volatile char time_str[300];
-volatile char temp_str[300];
 volatile char duty_str[300];
 
 //QueueHandle
 QueueHandle_t xQueueTouch;
-QueueHandle_t xQueueTemp;
-QueueHandle_t xQueueRTC;
-QueueHandle_t xQueueAfec;
-QueueHandle_t xQueuePot;
-QueueHandle_t xQueueDuty;
+QueueHandle_t xQueueTemp, xQueueAfec, xQueueRTC, xQueuePot , xQueueDuty;
 
 //Semaphores
 SemaphoreHandle_t xSemaphoreRTC;
@@ -248,7 +243,7 @@ void butless_callback(void){
 
 static void AFEC_Temp_callback(void)
 {
-	int32_t tvalue;
+	int32_t tvalue = 0;
 	tvalue = afec_channel_get_value(AFEC0, AFEC_CHANNEL_TEMP);
 	xQueueSendFromISR( xQueueAfec, &tvalue, 0);
 }
@@ -419,15 +414,17 @@ void io_init(void)
 	PIO_IT_FALL_EDGE,
 	butless_callback);
 
-	// Ativa interrupção
-	pio_enable_interrupt(BUTPLUS_PIO, BUTPLUS_PIO_IDX_MASK);
-	pio_enable_interrupt(BUTLESS_PIO, BUTLESS_PIO_IDX_MASK);
+
 
 	// Configura NVIC para receber interrupcoes do PIO do botao 
 	NVIC_EnableIRQ(BUTPLUS_PIO_ID);
 	NVIC_SetPriority(BUTPLUS_PIO_ID, 5);
 	NVIC_EnableIRQ(BUTLESS_PIO_ID);
 	NVIC_SetPriority(BUTLESS_PIO_ID, 5);
+	
+		// Ativa interrupção
+		pio_enable_interrupt(BUTPLUS_PIO, BUTPLUS_PIO_IDX_MASK);
+		pio_enable_interrupt(BUTLESS_PIO, BUTLESS_PIO_IDX_MASK);
 }
 void PWM0_init(uint channel, uint duty){
 	/* Enable PWM peripheral clock */
@@ -523,6 +520,16 @@ void font_draw_text(tFont *font, const char *text, int x, int y, int spacing) {
 	}
 }
 
+// AFEC
+static int32_t convert_adc_to_temp(int32_t ADC_value){
+
+	int32_t ul_vol;
+	
+	//ul_vol = ADC_value * 100 / 4096;
+	ul_vol = (ADC_value-17) * 100 / 4040;
+	return ul_vol;
+}
+
 void draw_screen(void) {
 	ili9488_set_foreground_color(COLOR_CONVERT(COLOR_WHITE));
 	ili9488_draw_filled_rectangle(0, 0, ILI9488_LCD_WIDTH-1, ILI9488_LCD_HEIGHT-1);
@@ -540,12 +547,14 @@ void draw_icons(void) {
 }
 
 void draw_temperature(int temperature){
-	sprintf(temp_str, "%2d °C" , temperature);
+	volatile char temp_str[300];
+	sprintf(temp_str, "%2d C" , temperature);
 	ili9488_draw_filled_rectangle(20,320,100,370);
 	font_draw_text(&digital52, temp_str, 20, 320, 1);
 }
 
 void draw_duty(int duty) {
+	duty = - duty;
 	sprintf(duty_str, "%2d   ", duty);
 	font_draw_text(&digital52, duty_str, 210, 320, 1);
 }
@@ -567,14 +576,6 @@ uint32_t convert_axis_system_y(uint32_t touch_x) {
 	return ILI9488_LCD_HEIGHT*touch_x/4096;
 }
 
-
-// AFEC
-static int32_t convert_adc_to_temp(int32_t ADC_value){
-
-  int32_t ul_vol;
-  
-  ul_vol = ADC_value * 100 / 4096;
-}
 
 // NOT USED
 void update_screen(uint32_t tx, uint32_t ty) {
@@ -621,21 +622,21 @@ void mxt_handler(struct mxt_device *device, uint *x, uint *y)
 /* tasks                                                                */
 /************************************************************************/
 
-/* void task_mxt(void){
-// 
-// 	struct mxt_device device; /* Device data container */
-//  	mxt_init(&device);       	/* Initialize the mXT touch device */
-//    touchData touch;          /* touch queue data type*/
-//    
-// 	while (true) {  
+ void task_mxt(void){
+ 
+ 	struct mxt_device device; /* Device data container */
+  	mxt_init(&device);       	/* Initialize the mXT touch device */
+    touchData touch;          /* touch queue data type*/
+    
+ 	while (true) {  
 		  /* Check for any pending messages and run message handler if any
 		   * message is found in the queue */
-//		  if (mxt_is_message_pending(&device)) {
-//		  	mxt_handler(&device, &touch.x, &touch.y);
-//        xQueueSend( xQueueTouch, &touch, 0);           /* send mesage to queue */
-//      }
-//     vTaskDelay(100);
-//	}
+		  if (mxt_is_message_pending(&device)) {
+		  	mxt_handler(&device, &touch.x, &touch.y);
+        xQueueSend( xQueueTouch, &touch, 0);           /* send mesage to queue */
+      }
+     vTaskDelay(100);
+	}
 } 
 
 
@@ -648,7 +649,7 @@ void task_lcd(void){
   draw_screen();
   draw_lines();
   draw_icons();
-  draw_duty(0);
+ // draw_duty(0);
   //draw_texts();
   
   touchData touch;
@@ -658,13 +659,13 @@ void task_lcd(void){
     
   while (true) {  
 
-	 if (xQueueReceive( xQueueTemp, &(temperature), ( TickType_t )  500 / portTICK_PERIOD_MS)) {
+	if (xQueueReceive( xQueueAfec, &(temperature), ( TickType_t )  100 / portTICK_PERIOD_MS)) {
+		 temperature = convert_adc_to_temp(temperature);
 		 draw_temperature(temperature);
-		 vTaskDelay(310 / portTICK_PERIOD_MS);
+		 printf("\ntemp recebida: %d\n", temperature);
 	 }   
 	 if (xQueueReceive(xQueueDuty, &(duty), ( TickType_t )  10 / portTICK_PERIOD_MS)) {
 		 draw_duty(duty);
-		 vTaskDelay(310 / portTICK_PERIOD_MS);
 	 }
 	  
   }	 
@@ -683,7 +684,7 @@ static void task_pwm(void){
 
 	while (1) {
 		if (xQueueReceive( xQueuePot, &(pot), ( TickType_t ) 10 / portTICK_PERIOD_MS)) {
-			pwm_channel_update_duty(PWM0, &g_pwm_channel_led,(pot+100));
+			pwm_channel_update_duty(PWM0, &g_pwm_channel_led,(pot));
 			printf("duty: %d", pot);
 			vTaskDelay(300 / portTICK_PERIOD_MS);
 			xQueueSend(xQueueDuty, &pot, 0);
@@ -698,18 +699,15 @@ void task_afec(void){
 	xQueueAfec = xQueueCreate( 10, sizeof( int32_t ) );
 
 	config_ADC_TEMP();
-	afec_start_software_conversion(AFEC0);
 	
 	int32_t adcvalue;
 	int32_t tvalue;
 
 	while (true) {
-		if (xQueueReceive( xQueueAfec, &(adcvalue), ( TickType_t )  2000 / portTICK_PERIOD_MS)) {
-			tvalue = convert_adc_to_temp(adcvalue);
 			afec_start_software_conversion(AFEC0);
-			xQueueSend( xQueueTemp, &tvalue, 0);
-		}
+			vTaskDelay(4000);
 	}
+
 }
 
 static void task_rtc(void *pvParameters){
@@ -760,9 +758,12 @@ static void task_led(void *pvParameters)
 			xQueueSend( xQueuePot, &duty, 0);
 		}
 		if( xSemaphoreTake(xSemaphoreLess, ( TickType_t ) 500) == pdTRUE  ){
+			if (duty ==-100){
+				duty = 0;
+			} else {
 			duty = duty - 10;
 			xQueueSend( xQueuePot, &duty, 0);
-			
+			}
 		}
 		
 	}
